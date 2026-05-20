@@ -1,9 +1,7 @@
 services:
   - type: web
     name: lms-backend
-    env: node
-    buildCommand: npm install && npx puppeteer browsers install chrome
-    startCommand: npm start
+    env: docker
     envVars:
       - key: NODE_ENV
         value: production
