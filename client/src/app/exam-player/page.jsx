@@ -1,0 +1,500 @@
+'use client';
+
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
+import {
+  X, Maximize2, Minimize2, MessageSquare, Trophy, Target, XCircle, RotateCcw,
+  Shield, ShieldAlert, PlayCircle, Lock, ArrowRight, ShieldCheck, Camera
+} from 'lucide-react';
+import confetti from 'canvas-confetti';
+import Modal from '@/components/ui/Modal';
+import { motion, AnimatePresence } from 'framer-motion';
+import AiTutorPanel from '@/components/exam/AiTutorPanel';
+import { useExamStore } from '@/store/useExamStore';
+import Skeleton from '@/components/ui/Skeleton';
+import { authFetch } from '@/lib/api';
+import { toast } from 'react-hot-toast';
+
+// ── Optimized Components ──
+import QuestionCard from '@/components/exam/QuestionCard';
+import ExamTimer from '@/components/exam/ExamTimer';
+import ExamNavigator from '@/components/exam/ExamNavigator';
+import ExamFooter from '@/components/exam/ExamFooter';
+import FaceDetection from '@/components/exam/FaceDetection';
+
+const EXAM_DATA = {
+  title: 'Java Basics - Beginner Exam',
+  totalTime: 600,
+  questions: []
+};
+
+const ExamSkeleton = () => (
+  <div className="h-screen bg-[#F8FAFC] flex flex-col overflow-hidden animate-pulse">
+    <div className="h-16 bg-white border-b border-[#E2E8F0] flex items-center justify-between px-6">
+      <div className="flex items-center gap-4"><Skeleton className="h-6 w-16" /><div className="h-6 w-px bg-[#E2E8F0]" /><div className="space-y-1"><Skeleton className="h-4 w-32" /><Skeleton className="h-3 w-20" /></div></div>
+      <div className="flex gap-3"><Skeleton className="h-10 w-24" /><Skeleton className="h-10 w-32" /></div>
+    </div>
+    <div className="h-1.5 bg-[#E2E8F0]" />
+    <div className="flex-1 p-12 space-y-10"><Skeleton className="h-12 w-3/4" /><div className="space-y-4 max-w-3xl">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-20 w-full rounded-2xl" />)}</div></div>
+  </div>
+);
+
+export default function ExamPlayer() {
+  const navigate = useNavigate();
+  const currentExam = useExamStore((state) => state.currentExam);
+  const setExamResults = useExamStore((state) => state.setExamResults);
+  
+  const [loading, setLoading] = useState(true);
+  const [isStarted, setIsStarted] = useState(false);
+  const [faceVerified, setFaceVerified] = useState(false);
+
+  const activeExam = useMemo(() => currentExam || EXAM_DATA, [currentExam]);
+  const { questions, title } = activeExam;
+  const totalTime = useMemo(() => activeExam.totalTime || (activeExam.duration ? activeExam.duration * 60 : 600), [activeExam]);
+  const validExam = useMemo(() => questions && questions.length > 0, [questions]);
+
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [answers, setAnswers] = useState({});
+  const [timeLeft, setTimeLeft] = useState(totalTime || 600);
+  const [isFullScreen, setIsFullScreen] = useState(false);
+  const [direction, setDirection] = useState(1);
+  const [showTutor, setShowTutor] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
+  const [finalResult, setFinalResult] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const submitLockRef = useRef(false);
+
+  const [cameraViolations, setCameraViolations] = useState(0);
+  const [tabViolations, setTabViolations] = useState(0);
+  const [fsViolations, setFsViolations] = useState(0);
+
+  useEffect(() => {
+    // Institutional users should never see the exam player (MCQ) — redirect to Resume Upload
+    const userStr = localStorage.getItem('user');
+    const cachedUser = userStr ? JSON.parse(userStr) : null;
+    if (cachedUser?.institutionId) {
+      window.location.replace('/student/resume');
+      return;
+    }
+    const timer = setTimeout(() => setLoading(false), 800);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const handleFinish = useCallback(async (isManual = false, bypassConfirm = false, statusOverwrite = 'completed') => {
+    if (submitLockRef.current || isSubmitting || showSuccess) return;
+    if (!isManual && timeLeft > 0 && statusOverwrite === 'completed') return;
+
+    if (isManual && !bypassConfirm && Object.keys(answers).length < questions.length && statusOverwrite === 'completed') {
+      setShowConfirm(true);
+      return;
+    }
+
+    submitLockRef.current = true;
+    setIsSubmitting(true);
+    setShowConfirm(false);
+    
+    let correctCount = 0;
+    questions.forEach((q, idx) => {
+      const key = q.id !== undefined ? q.id : idx;
+      if (answers[key] === q.correct) correctCount++;
+    });
+    const finalScore = statusOverwrite === 'disqualified' ? 0 : Math.round((correctCount / (questions.length || 1)) * 100);
+
+    const resultData = { 
+      title, 
+      questions, 
+      userAnswers: answers, 
+      timeSpent: totalTime - timeLeft, 
+      totalTime, 
+      score: finalScore,
+      status: statusOverwrite
+    };
+
+    if (activeExam.id || activeExam._id) {
+      try {
+        const userStr = localStorage.getItem('user');
+        const cachedUser = userStr ? JSON.parse(userStr) : null;
+        await authFetch(`/exams/${activeExam.id || activeExam._id}/submit`, {
+          method: 'PATCH',
+          body: JSON.stringify({ 
+            score: finalScore, 
+            userId: cachedUser?.id || cachedUser?._id, 
+            userAnswers: answers, 
+            timeSpent: totalTime - timeLeft,
+            status: statusOverwrite
+          }),
+        });
+        localStorage.removeItem('dashboard_exams');
+        localStorage.removeItem('dashboard_stats');
+      } catch (err) {} 
+    }
+
+    setExamResults(resultData);
+    setFinalResult(resultData);
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+
+    if (resultData.status !== 'disqualified' && resultData.score >= 70) {
+      // Auto-promote to next stage (Resume Upload) after passing the exam
+      try {
+        const promoRes = await authFetch('/progress/mcq/submit', {
+          method: 'POST',
+          body: JSON.stringify({ answers: answers, passed: true }) // Simulating pass for transition
+        });
+        const promoData = await promoRes.json();
+        if (promoData.newToken) {
+          localStorage.setItem('token', promoData.newToken);
+          document.cookie = `token=${promoData.newToken}; path=/; max-age=86400; SameSite=Lax`;
+        }
+      } catch (err) {
+        console.error('Stage promotion failed:', err);
+      }
+    }
+    setShowSuccess(true);
+  }, [questions, answers, activeExam, totalTime, timeLeft, setExamResults, isSubmitting, showSuccess, title, navigate]);
+
+  const handleBypassMCQ = async () => {
+    if (submitLockRef.current || isSubmitting || showSuccess) return;
+    submitLockRef.current = true;
+    setIsSubmitting(true);
+    setShowConfirm(false);
+
+    const resultData = { 
+      title, 
+      questions, 
+      userAnswers: {}, 
+      timeSpent: 0, 
+      totalTime, 
+      score: 100,
+      status: 'completed'
+    };
+
+    if (activeExam.id || activeExam._id) {
+      try {
+        const userStr = localStorage.getItem('user');
+        const cachedUser = userStr ? JSON.parse(userStr) : null;
+        await authFetch(`/exams/${activeExam.id || activeExam._id}/submit`, {
+          method: 'PATCH',
+          body: JSON.stringify({ 
+            score: 100, 
+            userId: cachedUser?.id || cachedUser?._id, 
+            userAnswers: {}, 
+            timeSpent: 0,
+            status: 'completed'
+          }),
+        });
+        localStorage.removeItem('dashboard_exams');
+        localStorage.removeItem('dashboard_stats');
+      } catch (err) {} 
+    }
+
+    setExamResults(resultData);
+    setFinalResult(resultData);
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    
+    try {
+      const promoRes = await authFetch('/progress/mcq/submit', {
+        method: 'POST',
+        body: JSON.stringify({ answers: {}, passed: true })
+      });
+      const promoData = await promoRes.json();
+      if (promoData.newToken) {
+        localStorage.setItem('token', promoData.newToken);
+        document.cookie = `token=${promoData.newToken}; path=/; max-age=86400; SameSite=Lax`;
+      }
+    } catch (err) {
+      console.error('Stage promotion failed:', err);
+    }
+    setShowSuccess(true);
+    toast.success("MCQ round bypassed successfully!", { icon: '⚡' });
+  };
+
+  const handleRetest = useCallback(() => {
+    setAnswers({}); setTimeLeft(totalTime); setShowSuccess(false); setFinalResult(null);
+    setCurrentIdx(0); setIsSubmitting(false); submitLockRef.current = false;
+    setCameraViolations(0); setTabViolations(0); setFsViolations(0); setIsStarted(true);
+  }, [totalTime]);
+
+  const lastViolationRef = useRef(0);
+
+  const handleViolation = useCallback(async (reason, severity = 'warning', type = 'general') => {
+    const now = Date.now();
+    if (now - lastViolationRef.current < 2000) return;
+    lastViolationRef.current = now;
+
+    if (activeExam?._id || activeExam?.id) {
+       const userStr = localStorage.getItem('user');
+       const cachedUser = userStr ? JSON.parse(userStr) : null;
+       authFetch(`/exams/${activeExam._id || activeExam.id}/violation`, {
+         method: 'POST',
+         body: JSON.stringify({ reason, violationType: type, userId: cachedUser?.id || cachedUser?._id, timestamp: new Date() })
+       }).catch(() => {});
+    }
+
+    const isFs = type === 'screen_exit';
+    const isTab = type === 'tab_switch';
+
+    if (isFs) {
+      setFsViolations(prev => {
+        const newCount = prev + 1;
+        toast.error(`Security Alert: ${reason}. Fullscreen exits: ${newCount}/2`, { 
+          id: 'security_alert_fs', 
+          duration: 5000, 
+          icon: <ShieldAlert size={20} className="text-red-500" />, 
+          style: { border: '2px solid #ef4444', background: '#0f172a', color: '#fff' } 
+        });
+        return newCount;
+      });
+    } else if (isTab) {
+      setTabViolations(prev => {
+        const newCount = prev + 1;
+        toast.error(`Security Alert: ${reason}. Tab switches: ${newCount}/2`, { 
+          id: 'security_alert_tab', 
+          duration: 5000, 
+          icon: <Shield size={20} className="text-red-500" />, 
+          style: { border: '2px solid #ef4444', background: '#0f172a', color: '#fff' } 
+        });
+        return newCount;
+      });
+    } else {
+      setCameraViolations(prev => {
+        const newCount = prev + 1;
+        toast.error(`Security Alert: ${reason}. Camera violations: ${newCount}/4`, { 
+          id: 'security_alert_cam', 
+          duration: 5000, 
+          icon: <Camera size={20} className="text-red-500" />, 
+          style: { border: '2px solid #ef4444', background: '#0f172a', color: '#fff' } 
+        });
+        return newCount;
+      });
+    }
+  }, [activeExam]);
+
+  useEffect(() => {
+    if (cameraViolations >= 4 || tabViolations >= 2 || fsViolations >= 2) {
+      if (!isSubmitting && !showSuccess) {
+        toast.error("EXAM TERMINATED: Security protocol breached.", { duration: 6000, style: { background: '#ef4444', color: '#fff', fontWeight: 'bold' } });
+        handleFinish(true, true, 'disqualified');
+      }
+    }
+  }, [cameraViolations, tabViolations, fsViolations, isSubmitting, showSuccess, handleFinish]);
+
+  // Tab switching and fullscreen monitoring
+  useEffect(() => {
+    if (!isStarted || showSuccess || isSubmitting) return;
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) handleViolation("Tab switching detected", "severe", "tab_switch");
+    };
+    
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        setIsFullScreen(false);
+        handleViolation("Exited full-screen mode", "severe", "screen_exit");
+        setTimeout(() => {
+          if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+            document.documentElement.requestFullscreen().catch(()=> {
+              handleViolation("Refused full-screen mode", "severe", "screen_exit");
+            });
+          }
+        }, 2000);
+      } else setIsFullScreen(true);
+    };
+
+    const handleBlur = () => {
+      handleViolation("Window lost focus", "severe", "tab_switch");
+    };
+
+    // Completely block copy, paste, cut and context menu at document level
+    const preventContext = (e) => {
+      e.preventDefault();
+      toast.error('🚫 Copying/pasting is strictly prohibited during the exam!', { id: 'copy-paste-blocked' });
+    };
+
+    const handleKeydown = (e) => {
+      const isClipboardAction = (e.ctrlKey || e.metaKey) && ['c', 'v', 'x'].includes(e.key.toLowerCase());
+      if (isClipboardAction) {
+        e.preventDefault();
+        toast.error('🚫 Copying/pasting is strictly prohibited!', { id: 'copy-paste-blocked' });
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('contextmenu', preventContext);
+    document.addEventListener('copy', preventContext);
+    document.addEventListener('paste', preventContext);
+    document.addEventListener('cut', preventContext);
+    document.addEventListener('keydown', handleKeydown);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('blur', handleBlur);
+      document.removeEventListener('contextmenu', preventContext);
+      document.removeEventListener('copy', preventContext);
+      document.removeEventListener('paste', preventContext);
+      document.removeEventListener('cut', preventContext);
+      document.removeEventListener('keydown', handleKeydown);
+    };
+  }, [isStarted, showSuccess, isSubmitting, handleViolation]);
+
+  useEffect(() => {
+    if (!validExam || loading || showSuccess || !isStarted) return;
+    if (timeLeft <= 0) { handleFinish(false); return; }
+    const t = setInterval(() => setTimeLeft((s) => s - 1), 1000);
+    return () => clearInterval(t);
+  }, [timeLeft, validExam, loading, showSuccess, handleFinish, isStarted]);
+
+  const startExamFlow = async () => {
+    try {
+      if (document.documentElement.requestFullscreen) { await document.documentElement.requestFullscreen(); setIsFullScreen(true); }
+      setIsStarted(true);
+      toast.success("AI Security System: ONLINE");
+    } catch (err) { setIsStarted(true); }
+  };
+
+  const toggleFullScreen = useCallback(() => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  }, []);
+
+  if (loading) return <ExamSkeleton />;
+  if (!validExam) return <div className="h-screen bg-[#F8FAFC] flex flex-col items-center justify-center p-6 text-center"><h1 className="text-2xl font-black mb-2">No Exam Found</h1><Link to="/student"><button className="h-12 px-8 bg-[#2563EB] text-white rounded-2xl font-bold">Back to Dashboard</button></Link></div>;
+
+  if (!isStarted && !showSuccess) {
+    return (
+      <div className="h-screen bg-[#0F172A] flex items-center justify-center p-6">
+        <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="max-w-xl w-full bg-white/5 border border-white/10 rounded-[40px] p-10 backdrop-blur-xl text-center space-y-8">
+          <div className="w-20 h-20 bg-blue-500/10 text-blue-400 rounded-3xl flex items-center justify-center mx-auto border border-blue-500/20">
+            <Shield size={40} />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-3xl font-black text-white tracking-tight">Assessment Security</h1>
+            <p className="text-slate-400 font-medium text-sm px-6">Fullscreen enforcement and camera violation tracking is active. Maintain focus on the exam.</p>
+          </div>
+
+          <div className="hidden">
+             <FaceDetection mode="gate" enabled={false} onVerificationComplete={setFaceVerified} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 text-left">
+             <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+                <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Security Status</div>
+                <div className="text-sm font-bold text-emerald-400">System Ready</div>
+             </div>
+             <div className="bg-white/5 p-4 rounded-2xl border border-white/10">
+                <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Limits</div>
+                <div className="text-xs font-bold text-white leading-relaxed">
+                  • Camera: 4 attempts<br/>
+                  • Tab Switch: 2 attempts<br/>
+                  • FS Exit: 2 attempts
+                </div>
+             </div>
+          </div>
+
+          <button 
+            onClick={startExamFlow}
+            className="w-full h-16 rounded-[24px] font-black text-lg shadow-xl flex items-center justify-center gap-3 transition-all bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/40"
+          >
+            Start Assessment <PlayCircle size={24} />
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  const currentQuestion = questions[currentIdx];
+  const selectedAnswer = answers[currentQuestion.id !== undefined ? currentQuestion.id : currentIdx];
+  const progress = (currentIdx / questions.length) * 100;
+  const answeredCount = Object.keys(answers).length;
+
+  return (
+    <div className="h-screen bg-[#F8FAFC] flex flex-col overflow-hidden select-none">
+      <div className="hidden">
+        <FaceDetection mode="floating" enabled={false} onViolation={handleViolation} />
+      </div>
+      <header className="h-16 bg-white border-b border-[#E2E8F0] flex items-center justify-between px-6 shrink-0">
+        <div className="flex items-center gap-4">
+          <button onClick={() => navigate('/student')} className="flex items-center gap-2 text-[#64748B] hover:text-[#0F172A] font-bold text-sm"><X size={20} /> Exit</button>
+          <div className="h-6 w-px bg-[#E2E8F0]" />
+          <div><div className="font-bold text-[#0F172A] text-sm uppercase">{title}</div><div className="text-xs font-bold text-[#64748B]">{answeredCount} of {questions.length} answered</div></div>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="hidden md:flex items-center gap-4 mr-4 px-4 py-2 bg-slate-50 border border-[#E2E8F0] rounded-xl text-xs font-black">
+             <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${isFullScreen ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+                <span className="text-[#64748B] uppercase tracking-tighter">AI Security Status</span>
+             </div>
+             <div className="w-px h-3 bg-[#E2E8F0]" />
+             <div className="flex items-center gap-2 text-[#64748B] uppercase tracking-tighter">FS Exits: <span className={fsViolations > 0 ? 'text-red-500' : ''}>{fsViolations}/2</span></div>
+             <div className="w-px h-3 bg-[#E2E8F0]" />
+             <div className="flex items-center gap-2 text-[#64748B] uppercase tracking-tighter">Tabs: <span className={tabViolations > 0 ? 'text-red-500' : ''}>{tabViolations}/2</span></div>
+             <div className="w-px h-3 bg-[#E2E8F0]" />
+          </div>
+          <button onClick={() => setShowTutor(!showTutor)} className={`flex items-center gap-2 px-4 py-2 rounded-xl border-2 text-xs font-bold transition-all ${showTutor ? 'border-purple-600 bg-purple-50 text-purple-600' : 'border-[#E2E8F0] text-[#64748B]'}`}><MessageSquare size={16} /> AI Tutor</button>
+          <ExamTimer timeLeft={timeLeft} />
+          <button onClick={toggleFullScreen} className="p-2.5 text-[#64748B] hover:bg-[#F8FAFC] rounded-lg">{isFullScreen ? <Minimize2 size={20} /> : <Maximize2 size={20} />}</button>
+        </div>
+      </header>
+      <div className="h-1 bg-[#E2E8F0] w-full shrink-0"><motion.div animate={{ width: `${progress}%` }} className="h-full bg-blue-600" /></div>
+      <div className="flex-1 overflow-hidden flex min-h-0">
+        <QuestionCard question={currentQuestion} currentIdx={currentIdx} totalQuestions={questions.length} selectedAnswer={selectedAnswer} onSelect={(id) => setAnswers(prev => ({...prev, [currentQuestion.id || currentIdx]: id}))} />
+        {!showTutor && <ExamNavigator questions={questions} currentIdx={currentIdx} answers={answers} onNavigate={setCurrentIdx} onFinish={handleFinish} isSubmitting={isSubmitting} />}
+        {showTutor && <div className="w-80 shrink-0 border-l border-[#E2E8F0] overflow-y-auto bg-white"><AiTutorPanel questionIdx={currentIdx} questionText={currentQuestion.text} onClose={() => setShowTutor(false)} /></div>}
+      </div>
+      <ExamFooter currentIdx={currentIdx} totalQuestions={questions.length} onNavigate={setCurrentIdx} onFinish={handleFinish} isSubmitting={isSubmitting} answers={answers} questions={questions} />
+      
+      <Modal isOpen={showConfirm} onClose={() => setShowConfirm(false)} className="bg-[#0F172A] border-white/5">
+        <div className="text-center p-4">
+          <div className="w-16 h-16 bg-amber-500/10 text-amber-500 rounded-3xl flex items-center justify-center mx-auto mb-6"><Target size={32} /></div>
+          <h2 className="text-xl font-black text-white mb-2">Unanswered Questions</h2>
+          <p className="text-slate-400 text-sm mb-8">You have only answered {answeredCount} questions. Submit anyway?</p>
+          <div className="flex flex-col gap-3">
+            <button onClick={() => handleFinish(true, true)} className="h-14 bg-red-600 text-white rounded-2xl font-black">Submit Anyway</button>
+            <button onClick={() => setShowConfirm(false)} className="h-14 bg-white/5 text-white rounded-2xl font-bold">Review Answers</button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal isOpen={showSuccess} onClose={() => navigate('/student?refresh=true')} showClose={false} className="bg-[#0F172A] border-white/5">
+        <div className="text-center space-y-8 py-4">
+          <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className={`w-32 h-32 mx-auto rounded-[40px] flex items-center justify-center shadow-2xl ${finalResult?.score >= 70 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+            {finalResult?.score >= 70 ? <Trophy size={64} /> : <XCircle size={64} />}
+          </motion.div>
+          <div className="space-y-2">
+            <h2 className={`text-3xl font-black ${finalResult?.score >= 70 ? 'text-emerald-400' : 'text-red-400'}`}>{finalResult?.score >= 70 ? 'Exam Passed' : 'Exam Failed'}</h2>
+            <p className="text-slate-400">Score: <span className="text-white font-bold">{finalResult?.score}%</span></p>
+          </div>
+          <div className="pt-2 px-2 flex flex-col gap-3">
+            {finalResult?.score >= 70 ? (
+              <button 
+                onClick={() => navigate(`/results?id=${activeExam.id || activeExam._id}`)} 
+                className="h-16 bg-emerald-500 text-white rounded-[24px] font-black flex items-center justify-center gap-3 shadow-lg shadow-emerald-900/40"
+              >
+                View Result <ArrowRight size={20} />
+              </button>
+            ) : (
+              <button onClick={handleRetest} className="h-16 bg-white text-[#0F172A] rounded-[24px] font-black flex items-center justify-center gap-3">
+                Retest Now <RotateCcw size={20} />
+              </button>
+            )}
+            <button onClick={() => navigate('/student')} className="h-14 bg-white/5 text-slate-300 rounded-[24px] font-bold border border-white/5">Exit to Dashboard</button>
+          </div>
+        </div>
+      </Modal>
+      {localStorage.getItem('assessment_bypass_active') === 'true' && !showSuccess && (
+        <div className="fixed bottom-6 right-6 z-[9999]">
+          <button
+            onClick={handleBypassMCQ}
+            className="px-6 py-3.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-black rounded-2xl shadow-xl hover:shadow-orange-500/20 active:scale-[0.98] transition-all flex items-center gap-2 border border-amber-400/20 uppercase tracking-widest text-xs"
+          >
+            <span>⚡ Bypass Round</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

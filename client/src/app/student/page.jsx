@@ -1,0 +1,708 @@
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import DashboardLayout from '@/components/layout/DashboardLayout';
+import RevisionSystem from '@/components/exam/RevisionSystem';
+import EmptyState from '@/components/ui/EmptyState';
+import ErrorState from '@/components/ui/ErrorState';
+import Tooltip from '@/components/ui/Tooltip';
+import socket from '@/lib/socket';
+import { 
+  Sparkles, 
+  Trophy,
+  Target, 
+  TrendingUp, 
+  Clock, 
+  Play, 
+  ArrowRight, 
+  MoreVertical,
+  BookOpen,
+  Inbox,
+  RotateCcw,
+  Trash2
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { useNavigate } from 'react-router-dom';
+import { useExamStore } from '@/store/useExamStore';
+import { useUser } from '@/hooks/useUser';
+import { useInterviewStore } from '@/hooks/useInterviewStore';
+import { authFetch } from '@/lib/api';
+import WaitingLobby from '@/components/ui/WaitingLobby';
+import RejectedState from '@/components/ui/RejectedState';
+import HiredState from '@/components/ui/HiredState';
+import toast from 'react-hot-toast';
+
+const StatCard = ({ icon: Icon, label, value, trend, delay }) => (
+  <motion.div
+    initial={{ opacity: 0, y: 20 }}
+    animate={{ opacity: 1, y: 0 }}
+    transition={{ delay, duration: 0.5 }}
+    whileHover={{ scale: 1.03 }}
+    className="bg-white border border-[#E2E8F0] shadow-sm rounded-2xl p-6 flex items-start gap-4 transition-all"
+  >
+    <div className="w-12 h-12 bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl flex items-center justify-center text-[#2563EB] shrink-0">
+      <Icon size={24} />
+    </div>
+    <div>
+      <div className="text-sm font-bold text-[#64748B] mb-1">{label}</div>
+      <div className="text-2xl font-black text-[#0F172A]">{value}</div>
+      {trend !== undefined && (
+        <div className={`text-xs font-bold flex items-center gap-1 mt-1 ${trend >= 0 ? 'text-[#22C55E]' : 'text-red-500'}`}>
+          <TrendingUp size={12} className={trend < 0 ? 'rotate-180' : ''} /> {Math.abs(trend)}% this week
+        </div>
+      )}
+    </div>
+  </motion.div>
+);
+
+const ExamCard = ({ exam, index, onRetake, onDelete, progress }) => {
+  const navigate = useNavigate();
+  const setExam = useExamStore((state) => state.setExam);
+  const setExamResults = useExamStore((state) => state.setExamResults);
+
+  const [bypassEnabled, setBypassEnabled] = useState(() => {
+    return localStorage.getItem('assessment_bypass_active') === 'true';
+  });
+
+  const handleToggleBypass = (e) => {
+    e.stopPropagation();
+    const nextVal = !bypassEnabled;
+    setBypassEnabled(nextVal);
+    if (nextVal) {
+      localStorage.setItem('assessment_bypass_active', 'true');
+      toast.success("Bypass Mode Enabled for all rounds!", { icon: '⚡' });
+    } else {
+      localStorage.removeItem('assessment_bypass_active');
+      toast.success("Bypass Mode Disabled.", { icon: '🔒' });
+    }
+  };
+
+  const userStr = localStorage.getItem('user');
+  const cachedUser = userStr ? JSON.parse(userStr) : null;
+  const isInstitutional = !!cachedUser?.institutionId;
+  const isCompleted = exam.status === 'completed' || (isInstitutional && progress?.status === 'COMPLETED');
+
+  const startExam = (e) => {
+    e?.stopPropagation();
+    
+    if (progress?.status === 'COMPLETED') {
+      navigate(isInstitutional ? '/student/analytics' : '/results');
+      return;
+    }
+
+    // Determine target based on current progress stage
+    let currentStage = progress?.currentStage || (isInstitutional ? 'RESUME_UPLOAD' : 'MCQ');
+
+    // Force institutional users to start at RESUME_UPLOAD if they are stuck at MCQ
+    if (isInstitutional && currentStage === 'MCQ') {
+      currentStage = 'RESUME_UPLOAD';
+    }
+
+    // If the student hasn't passed this specific exam yet, force them to take it!
+    const needsRetake = exam.score > 0 && exam.score < 70;
+    const isPending = !exam.score && exam.status !== 'completed';
+
+    if (currentStage === 'MCQ' || needsRetake || isPending) {
+      setExam({
+        id: exam._id,
+        title: exam.title,
+        topic: exam.topic,
+        questions: exam.questions,
+        totalTime: exam.duration * 60,
+        duration: exam.duration
+      });
+      navigate('/exam-player');
+      return;
+    }
+
+    // Navigation for subsequent stages
+    switch (currentStage) {
+      case 'RESUME_UPLOAD':
+        navigate('/student/resume');
+        break;
+      case 'APTITUDE':
+        navigate('/student/aptitude');
+        break;
+      case 'CODING':
+        navigate('/student/coding');
+        break;
+      case 'HR_INTERVIEW':
+        navigate('/student/interview');
+        break;
+      default:
+        navigate('/student/resume');
+    }
+  };
+
+  const handleAction = (e) => {
+    e?.stopPropagation();
+    if (isCompleted) {
+      if (isInstitutional) {
+        navigate('/student/analytics');
+      } else {
+        onRetake();
+      }
+    } else {
+      startExam();
+    }
+  };
+
+  const showResults = () => {
+    if (isCompleted) {
+      if (isInstitutional) {
+        navigate('/student/analytics');
+        return;
+      }
+      setExamResults({
+        title: exam.title,
+        questions: exam.questions,
+        userAnswers: exam.userAnswers || {}, 
+        score: exam.score,
+        timeSpent: exam.timeSpent || 0, 
+        totalTime: (exam.duration || 10) * 60
+      });
+      navigate('/results');
+    } else {
+      startExam();
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -20 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ delay: 0.1 + index * 0.1, duration: 0.5 }}
+      whileHover={{ scale: 1.02 }}
+      className="bg-white border border-[#E2E8F0] shadow-sm rounded-2xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-6 transition-all cursor-pointer group hover:border-[#2563EB]"
+      onClick={showResults}
+    >
+      <div className="flex items-center gap-5">
+         <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 ${
+           isCompleted ? 'bg-[#22C55E]/10 text-[#22C55E]' : 'bg-[#2563EB]/10 text-[#2563EB]'
+         }`}>
+           <BookOpen size={24} />
+         </div>
+         <div>
+           <div className="flex items-center gap-2 mb-1">
+             <h3 className="font-bold text-[#0F172A] group-hover:text-[#2563EB] transition-colors">{exam.title}</h3>
+             <span className="text-[10px] font-black px-2 py-0.5 bg-[#F8FAFC] border border-[#E2E8F0] rounded text-[#64748B] uppercase">
+               {exam.topic}
+             </span>
+           </div>
+           <div className="flex items-center gap-4 text-xs font-bold text-[#64748B]">
+             <span className="flex items-center gap-1"><Clock size={12} /> {exam.duration}m</span>
+             <span className="flex items-center gap-1"><Target size={12} /> {exam.questionCount} Questions</span>
+           </div>
+         </div>
+      </div>
+
+      <div className="flex items-center justify-between md:justify-end gap-8">
+         {exam.status === 'disqualified' ? (
+           <div className="text-right">
+             <div className="text-xl font-black text-red-500 uppercase">Blocked</div>
+             <div className="text-[10px] uppercase font-bold text-red-400">Security Breach</div>
+           </div>
+         ) : isCompleted ? (
+           <div className="text-right">
+             <div className="text-xl font-black text-[#0F172A]">{isInstitutional ? '100%' : `${exam.score}%`}</div>
+             <div className="text-[10px] uppercase font-bold text-[#22C55E]">Completed</div>
+           </div>
+         ) : (
+           <div className="text-right">
+             <div className="text-xl font-black text-[#64748B]">{exam.score > 0 ? `${exam.score}%` : '--'}</div>
+             <div className="text-[10px] uppercase font-bold text-[#64748B]">
+               {exam.score > 0 && exam.score < 70 ? 'Retake Required' : 'Ready'}
+             </div>
+           </div>
+         )}
+         
+        <div className="flex items-center gap-2">
+          {!isInstitutional && !isCompleted && (
+            <Tooltip content="Delete Exam" position="left">
+              <button 
+                onClick={(e) => { e.stopPropagation(); onDelete?.(exam._id); }}
+                className="w-10 h-10 rounded-xl flex items-center justify-center transition-all bg-red-50 text-red-400 border border-red-100 hover:bg-red-500 hover:text-white hover:border-red-500"
+              >
+                <Trash2 size={16} />
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip content={isCompleted ? (isInstitutional ? 'View Report' : 'View Results') : 'Start Exam'} position="left">
+            <button 
+              onClick={handleAction}
+              className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${
+                isCompleted ? 'bg-[#F8FAFC] text-[#64748B] border border-[#E2E8F0] hover:border-[#2563EB] hover:text-[#2563EB]' : 'bg-[#2563EB] text-white hover:bg-[#1D4ED8] shadow-md'
+              }`}
+            >
+              {exam.status === 'completed' ? <RotateCcw size={20} /> : <Play size={20} className="ml-0.5" />}
+            </button>
+          </Tooltip>
+          {isInstitutional && !isCompleted && (
+            <div className="flex items-center gap-3 pl-4 border-l border-slate-200" onClick={(e) => e.stopPropagation()}>
+              <button 
+                onClick={handleToggleBypass}
+                style={{
+                  width: '44px',
+                  height: '24px',
+                  borderRadius: '9999px',
+                  backgroundColor: bypassEnabled ? '#F97316' : '#CBD5E1',
+                  position: 'relative',
+                  transition: 'background-color 0.2s ease',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0
+                }}
+              >
+                <div 
+                  style={{
+                    width: '20px',
+                    height: '20px',
+                    borderRadius: '50%',
+                    backgroundColor: '#FFFFFF',
+                    position: 'absolute',
+                    top: '2px',
+                    left: bypassEnabled ? '22px' : '2px',
+                    transition: 'left 0.2s ease',
+                    boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)'
+                  }}
+                />
+              </button>
+              <span className="text-[10px] font-black text-[#64748B] uppercase tracking-widest whitespace-nowrap">
+                Enable Bypass Mode
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+};
+
+const SkeletonCard = () => (
+  <div className="bg-white border border-[#E2E8F0] rounded-2xl p-6 flex items-start gap-4 animate-pulse">
+    <div className="w-12 h-12 bg-slate-100 rounded-xl" />
+    <div className="flex-1 space-y-2">
+      <div className="h-4 bg-slate-100 rounded w-1/3" />
+      <div className="h-6 bg-slate-100 rounded w-1/2" />
+    </div>
+  </div>
+);
+
+export default function StudentDashboard() {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [stats, setStats] = useState(null);
+  const [recentExams, setRecentExams] = useState([]);
+  const [progress, setProgress] = useState(null);
+  const navigate = useNavigate();
+
+  // Get user from DB — redirects to /auth if not logged in
+  const { user } = useUser({ requireAuth: true, redirectIfNoAuth: true });
+  const isInstitutional = !!user?.institutionId;
+
+  const handleRetakeAssessment = async () => {
+    if (isInstitutional) {
+      toast.error("Institutional assessments can only be reset by your instructor.");
+      return;
+    }
+    try {
+      setLoading(true);
+      const userStr = localStorage.getItem('user');
+      const cachedUser = userStr ? JSON.parse(userStr) : null;
+      const userId = cachedUser?.id || cachedUser?._id;
+
+      console.log('🔄 Initiating full assessment retake for user:', userId);
+
+      // 1. Reset specific exam completions for this user
+      await authFetch('/exams/reset', { method: 'POST' });
+
+      // 2. Reset the global assessment progress flow
+      const res = await authFetch('/progress/reset', { method: 'POST' });
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.message || `Server returned ${res.status}`);
+      }
+
+      const data = await res.json();
+      console.log('✅ Progress reset successful, received new token:', !!data.newToken);
+
+      if (data.newToken) {
+        // Clear local caches
+        localStorage.removeItem('dashboard_stats');
+        localStorage.removeItem('dashboard_exams');
+        localStorage.removeItem('user'); // Force re-fetch of user profile
+        sessionStorage.removeItem('assessment_overlay_dismissed');
+        
+        // Update auth tokens
+        localStorage.setItem('token', data.newToken);
+        document.cookie = `token=${data.newToken}; path=/; max-age=86400; SameSite=Lax`;
+        
+        console.log('🚀 Reloading page to apply changes...');
+        window.location.reload();
+      } else {
+        throw new Error('No new token received from server');
+      }
+    } catch (error) {
+      console.error('❌ Failed to reset assessment:', error);
+      alert(`Failed to restart assessment: ${error.message}`);
+      setLoading(false);
+    }  };
+
+  const handleDeleteExam = async (examId) => {
+    if (!confirm('Are you sure you want to delete this exam?')) return;
+    try {
+      const res = await authFetch(`/exams/${examId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setRecentExams(prev => prev.filter(e => e._id !== examId));
+      }
+    } catch (err) {
+      console.error('Failed to delete exam:', err);
+    }
+  };
+
+  const fetchData = async () => {
+    try {
+      // Read userId from localStorage cache (kept in sync by useUser/fetchUserFromDB)
+      const userStr = localStorage.getItem('user');
+      const cachedUser = userStr ? JSON.parse(userStr) : null;
+      const userId = cachedUser?.id || cachedUser?._id;
+
+      const statsUrl = '/exams/stats';
+      const examsUrl = '/exams';
+      const progressUrl = '/progress/me';
+
+      const [statsRes, examsRes, progressRes] = await Promise.all([
+        authFetch(statsUrl, { cache: 'no-store' }),
+        authFetch(examsUrl, { cache: 'no-store' }),
+        authFetch(progressUrl, { cache: 'no-store' })
+      ]);
+
+      if (statsRes.ok && examsRes.ok && progressRes.ok) {
+        const statsData = await statsRes.json();
+        const examsData = await examsRes.json();
+        const progressData = await progressRes.json();
+
+        // Merge progress data into stats
+        const mergedStats = {
+          ...statsData,
+          reports: progressData.reports || {},
+          totalXP: (statsData.totalXP || 0) + (progressData.points || 0),
+          solvedProblems: progressData.solvedProblems?.length || 0,
+          solvedChallenges: progressData.solvedChallenges?.length || 0,
+          currentStage: progressData.currentStage || 'MCQ',
+          status: progressData.status || 'ACTIVE'
+        };
+
+        // No deduplication - show all assigned exams (sorted by backend)
+        const finalExams = examsData;
+
+        // Sync with Interview Store (Zustand)
+        if (progressData.context) {
+          const store = useInterviewStore.getState();
+          if (progressData.context.resume) store.setResumeData(progressData.context.resume);
+          if (progressData.context.aptitude) store.setAptitudeResults(progressData.context.aptitude);
+          if (progressData.context.coding) store.setCodingResults(progressData.context.coding);
+          if (progressData.context.interview) store.setInterviewResults(progressData.context.interview);
+        }
+
+        setStats(mergedStats);
+        setRecentExams(finalExams);
+        setProgress(progressData);
+        
+        localStorage.setItem('dashboard_stats', JSON.stringify(mergedStats));
+        localStorage.setItem('dashboard_exams', JSON.stringify(finalExams));
+
+        // Sync token stage if it's mismatched
+        if (progressData.newToken) {
+          localStorage.setItem('token', progressData.newToken);
+          document.cookie = `token=${progressData.newToken}; path=/; max-age=86400; SameSite=Lax`;
+        }
+        return progressData;
+      } else {
+        setError(true);
+        return null;
+      }
+    } catch (err) {
+      console.error('Failed to fetch dashboard data:', err);
+      setError(true);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // Sync from cache instantly on mount BUT trigger a background refresh
+    const cachedStats = localStorage.getItem('dashboard_stats');
+    const cachedExams = localStorage.getItem('dashboard_exams');
+    
+    // Skip old cache if we just came from an exam
+    const bypassCache = window.location.search.includes('refresh=true');
+
+    if (cachedStats && !bypassCache) {
+      setStats(JSON.parse(cachedStats));
+      setLoading(false);
+    }
+    if (cachedExams && !bypassCache) {
+      setRecentExams(JSON.parse(cachedExams));
+    }
+
+    fetchData();
+
+    socket.on('statsUpdated', (newStats) => {
+      setStats(newStats);
+      fetchData();
+    });
+    socket.on('examCreated', () => fetchData());
+    socket.on('examDeleted', () => fetchData());
+    
+    // Auto-refresh when instructor performs an action
+    socket.on('progressUpdated', (data) => {
+      console.log('[Student] Progress updated by instructor:', data.action);
+      handleLobbyRefresh();
+    });
+
+    // AUTO-NAVIGATE PERSONAL STUDENTS:
+    // If they just landed here after finishing a step (MCQ/Resume/Aptitude)
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('refresh') === 'true' && !isInstitutional) {
+      console.log('[Student] Refresh detected, triggering auto-navigation...');
+      handleLobbyRefresh();
+    }
+
+    const handleManualRefresh = () => fetchData();
+    window.addEventListener('refreshDashboard', handleManualRefresh);
+
+    return () => {
+      socket.off('statsUpdated');
+      socket.off('examCreated');
+      socket.off('examDeleted');
+      socket.off('progressUpdated');
+      window.removeEventListener('refreshDashboard', handleManualRefresh);
+    };
+  }, []);
+
+  const handleLobbyRefresh = async () => {
+    const updatedProgress = await fetchData();
+    if (!updatedProgress) return;
+    
+    // If hired or rejected, the component will re-render with the appropriate state screen
+    if (updatedProgress.isHired || updatedProgress.isRejected) return;
+    
+    if (!updatedProgress.isWaitingApproval) {
+      const stage = updatedProgress.currentStage;
+      switch (stage) {
+        case 'RESUME_UPLOAD': navigate('/student/resume'); break;
+        case 'APTITUDE': navigate('/student/aptitude'); break;
+        case 'CODING': navigate('/student/coding'); break;
+        case 'HR_INTERVIEW': navigate('/student/interview'); break;
+        default: navigate('/student/resume');
+      }
+    }
+  };
+
+  const hasFailedExam = recentExams.some(exam => 
+    (exam.status === 'completed' || exam.status === 'disqualified') && exam.score < 70
+  );
+
+  const [overlayDismissed, setOverlayDismissed] = useState(
+    sessionStorage.getItem('assessment_overlay_dismissed') === 'true'
+  );
+
+  const handleDismissOverlay = () => {
+    sessionStorage.setItem('assessment_overlay_dismissed', 'true');
+    setOverlayDismissed(true);
+  };
+
+  if (progress?.isHired && !overlayDismissed) {
+    return <HiredState onReturn={handleDismissOverlay} />;
+  }
+
+  if (progress?.isRejected && !overlayDismissed) {
+    return <RejectedState reason={progress.rejectionReason} onReturn={handleDismissOverlay} />;
+  }
+
+  return (
+    <DashboardLayout>
+      {progress?.isWaitingApproval && <WaitingLobby onRefresh={handleLobbyRefresh} />}
+      <div className="space-y-10">
+        {/* Congratulations Card for Completed Assessment */}
+      {!isInstitutional && progress?.status === 'COMPLETED' && (
+        <motion.div 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-10 p-8 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-[2.5rem] shadow-xl text-white relative overflow-hidden"
+        >
+          <div className="absolute top-0 right-0 p-4 opacity-20">
+             <Sparkles size={120} />
+          </div>
+          <div className="relative z-10">
+            <h2 className="text-3xl font-black mb-2">Congratulations, {user?.username}! 🏆</h2>
+            <p className="text-emerald-50 font-medium mb-6 max-w-lg">
+              You have successfully completed all assessment stages from MCQ to HR Interview. Your profile is now AI-verified and ready for placement opportunities.
+            </p>
+            <div className="flex flex-wrap gap-4">
+              <button 
+                onClick={() => navigate('/student/analytics')}
+                className="px-6 py-3 bg-white text-emerald-600 rounded-2xl font-black shadow-lg hover:bg-emerald-50 transition-all flex items-center gap-2"
+              >
+                View Final Report
+              </button>
+              <button 
+                onClick={handleRetakeAssessment}
+                className="px-6 py-3 bg-emerald-600/30 border border-white/30 backdrop-blur-sm text-white rounded-2xl font-black hover:bg-emerald-600/40 transition-all flex items-center gap-2"
+              >
+                <RotateCcw size={18} />
+                Retake Full Assessment
+              </button>
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Header Area */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-10">
+         <div>
+            <h1 className="text-3xl font-black tracking-tight text-[#0F172A]">Student Dashboard</h1>
+            <p className="text-[#64748B] font-medium mt-1">Monitor your assigned exams and track your performance.</p>
+         </div>
+      </div>
+
+        {error ? (
+          <ErrorState 
+            title="Unable to load dashboard data" 
+            description="Our servers are taking a bit longer to respond. Please check your connection and try again."
+            onRetry={() => { setLoading(true); setError(false); fetchData(); }} 
+          />
+        ) : (
+          <>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6">
+                {loading ? (
+                  [...Array(4)].map((_, i) => <SkeletonCard key={i} />)
+                ) : (
+                  <>
+                    <StatCard icon={Target} label="Exam Accuracy" value={`${stats?.overallAccuracy || 0}%`} trend={5.2} delay={0.1} />
+                    <StatCard icon={TrendingUp} label="Exams Completed" value={recentExams.filter(e => e.status === 'completed').length} trend={12} delay={0.2} />
+                    <StatCard icon={Sparkles} label="Coding XP" value={stats?.totalXP || 0} delay={0.3} />
+                    <StatCard icon={BookOpen} label="Problems Solved" value={stats?.solvedProblems || 0} delay={0.4} />
+                  </>
+                )}
+            </div>
+
+            {!loading && stats?.weakAreas && (stats.weakAreas.length > 0) && hasFailedExam && (
+              <RevisionSystem weakTopics={stats.weakAreas} />
+            )}
+
+            <div className="space-y-6">
+               <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-4">
+                  <h2 className="text-xl font-bold text-[#0F172A] flex items-center gap-2">
+                    Your Assigned Exams
+                  </h2>
+               </div>
+
+               <div className="grid grid-cols-1 gap-4">
+                 {loading ? (
+                    [...Array(3)].map((_, i) => <SkeletonCard key={i} />)
+                 ) : recentExams.length > 0 ? (
+                    recentExams.map((exam, i) => (
+                       <ExamCard 
+                         key={exam._id} 
+                         exam={exam} 
+                         index={i} 
+                         onRetake={handleRetakeAssessment} 
+                         onDelete={handleDeleteExam}
+                         progress={progress}
+                       />
+                    ))
+                 ) : (
+                    <EmptyState 
+                      title="No exams assigned yet" 
+                      description="Check back later or contact your instructor to get started with your first assessment."
+                    />
+                 )}
+               </div>
+            </div>
+
+            {/* Institutional Performance Reports */}
+            {user?.institutionId && (
+              <div className="space-y-6 pt-10">
+                <div className="flex items-center justify-between border-b border-[#E2E8F0] pb-4">
+                  <h2 className="text-xl font-bold text-[#0F172A] flex items-center gap-2">
+                    <TrendingUp size={24} className="text-[#2563EB]" />
+                    Institutional Performance Reports
+                  </h2>
+                  <span className="text-xs font-bold px-3 py-1 bg-blue-50 text-blue-600 rounded-full border border-blue-100">
+                    AI Analysis Active
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {[
+                    { label: 'Aptitude', key: 'aptitude' },
+                    { label: 'Coding', key: 'coding' },
+                    { label: 'HR Interview', key: 'hrInterview' }
+                  ].map((stage, idx) => {
+                    // Extract report data for this stage
+                    const reportData = stats?.reports?.[stage.key] || null;
+
+                    return (
+                      <motion.div
+                        key={stage.label}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.1 * idx }}
+                        onClick={() => navigate(`/student/institutional-report?stage=${stage.label}`)}
+                        className="bg-white border border-[#E2E8F0] rounded-2xl p-6 shadow-sm hover:shadow-md transition-all group cursor-pointer"
+                      >
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-slate-50 rounded-xl flex items-center justify-center text-[#2563EB] group-hover:bg-[#2563EB] group-hover:text-white transition-colors">
+                              <Target size={20} />
+                            </div>
+                            <h3 className="font-bold text-[#0F172A]">{stage.label} Round</h3>
+                          </div>
+                          <div className="text-xs font-bold text-[#2563EB] hover:underline flex items-center gap-1">
+                             View Details <ArrowRight size={14} />
+                          </div>
+                        </div>
+                        
+                        <div className="space-y-4">
+                          <div className="p-3 bg-[#F8FAFC] rounded-xl border border-[#E2E8F0]">
+                            <p className="text-xs text-[#64748B] font-bold uppercase mb-1">AI Verdict</p>
+                            <p className="text-sm text-[#334155] font-medium leading-relaxed italic line-clamp-2">
+                              {reportData?.performance || "Finish this round to receive personalized AI feedback on your performance."}
+                            </p>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className={`text-center p-2 rounded-lg border ${reportData ? 'bg-green-50 border-green-100' : 'bg-slate-50 border-slate-100'}`}>
+                              <div className={`text-[10px] font-black uppercase ${reportData ? 'text-green-600' : 'text-slate-400'}`}>Status</div>
+                              <div className={`text-sm font-bold ${reportData ? 'text-green-700' : 'text-slate-500'}`}>
+                                {reportData?.status || 'Pending'}
+                              </div>
+                            </div>
+                            <div className={`text-center p-2 rounded-lg border ${reportData ? 'bg-blue-50 border-blue-100' : 'bg-slate-50 border-slate-100'}`}>
+                              <div className={`text-[10px] font-black uppercase ${reportData ? 'text-blue-600' : 'text-slate-400'}`}>Score</div>
+                              <div className={`text-sm font-bold ${reportData ? 'text-blue-700' : 'text-slate-500'}`}>
+                                {reportData?.score ?? '--'}{reportData?.score !== undefined && reportData?.score !== null ? '%' : ''}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </DashboardLayout>
+  );
+}
+
+

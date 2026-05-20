@@ -1,0 +1,81 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #FFFFFF;
+  --foreground: #0F172A;
+  --secondary: #F8FAFC;
+  --primary: #2563EB;
+  --accent: #7C3AED;
+  --border: #E2E8F0;
+  --text-primary: #0F172A;
+  --text-secondary: #334155;
+  --success: #22C55E;
+  --error: #EF4444;
+  --warning: #F59E0B;
+}
+
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+body {
+  color: var(--text-primary);
+  background: var(--background);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply px-4 py-2 bg-primary text-white font-medium rounded-lg hover:bg-primary-dark transition-all duration-200 active:scale-[0.98] flex items-center justify-center gap-2;
+  }
+  
+  .btn-secondary {
+    @apply px-4 py-2 bg-secondary text-text-primary font-medium rounded-lg border border-border hover:bg-slate-100 transition-all duration-200 active:scale-[0.98] flex items-center justify-center gap-2;
+  }
+
+  .btn-accent {
+    @apply px-4 py-2 bg-accent text-white font-medium rounded-lg hover:bg-accent-dark transition-all duration-200 active:scale-[0.98] flex items-center justify-center gap-2;
+  }
+
+  .card {
+    @apply bg-card border border-border rounded-xl shadow-sm overflow-hidden;
+  }
+
+  .input {
+    @apply w-full px-4 py-2 bg-card border border-border rounded-lg outline-none focus:border-primary transition-colors duration-200 placeholder:text-slate-400;
+  }
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+
+@layer utilities {
+  .skeleton {
+    @apply bg-slate-200 animate-pulse rounded;
+  }
+}
